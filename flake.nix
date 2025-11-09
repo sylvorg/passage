@@ -25,7 +25,8 @@
           devenv.shells = rec {
             default = passage;
             passage.packages = with pkgs;
-              binPath ++ [ config.packages.default age tree nixfmt-classic ];
+              binPath
+              ++ [ config.packages.default age fish nixfmt-classic tree zsh ];
           };
         };
     };

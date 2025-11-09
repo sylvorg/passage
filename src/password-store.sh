@@ -423,7 +423,7 @@ cmd_find() {
 	[[ $# -eq 0 ]] && die "Usage: $PROGRAM $COMMAND pass-names..."
 	IFS="," eval 'echo "Search Terms: $*"'
 	local terms="*$(printf '%s*|*' "$@")"
-	tree -N -C -l --noreport -P "${terms%|*}" --prune --matchdirs --ignore-case "$PREFIX" | tail -n +2 | sed -E 's/\.age(\x1B\[[0-9]+m)?( ->|$)/\1\2/g'
+	tree -N -C -l -I "*.sops" --noreport -P "${terms%|*}" --prune --matchdirs --ignore-case "$PREFIX" | tail -n +2 | sed -E 's/\.age(\x1B\[[0-9]+m)?( ->|$)/\1\2/g'
 }
 
 cmd_grep() {
@@ -780,7 +780,6 @@ cmd_extension() {
 	return 0
 }
 
-# TODO
 cmd_verify() {
 	local path="$1"
 	local passfile="$PREFIX/$path.age"

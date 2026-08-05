@@ -33,10 +33,20 @@ set_git() {
 	[[ $(git -C "$INNER_GIT_DIR" rev-parse --is-inside-work-tree 2>/dev/null) == true ]] || INNER_GIT_DIR=""
 }
 git_add_file() {
+
+	# Adapted From:
+	# Answer: https://stackoverflow.com/a/1215592
+	# User: https://stackoverflow.com/users/93555/krzysztof-klimonda
+	files="${@:1:$#-1}"
+
 	[[ -n $INNER_GIT_DIR ]] || return
-	git -C "$INNER_GIT_DIR" add "$1" || return
-	[[ -n $(git -C "$INNER_GIT_DIR" status --porcelain "$1") ]] || return
-	git_commit "$2"
+	git -C "$INNER_GIT_DIR" add $files || return
+	[[ -n $(git -C "$INNER_GIT_DIR" status --porcelain $files) ]] || return
+
+	# Adapted From:
+	# Answer: https://stackoverflow.com/a/33271194
+	# User: https://stackoverflow.com/users/3856785/epi272314
+	git_commit "${@:$#}"
 }
 git_commit() {
 	[[ -n $INNER_GIT_DIR ]] || return
@@ -94,7 +104,7 @@ reencrypt_path() {
 
 		set_age_recipients "$passfile_dir"
 		echo "$passfile_display: reencrypting with: age ${AGE_RECIPIENT_ARGS[@]}"
-		$AGE -d -i "$IDENTITIES_FILE" "$passfile" | $AGE -e "${AGE_RECIPIENT_ARGS[@]}" -o "$passfile_temp" &&
+		$AGE -d -i "$IDENTITIES_FILE" "$passfile" | $AGE -e -a "${AGE_RECIPIENT_ARGS[@]}" -o "$passfile_temp" &&
 		mv "$passfile_temp" "$passfile" || rm -f "$passfile_temp"
 	done < <(find "$1" -path '*/.git' -prune -o -iname '*.age' -print0)
 }
@@ -242,7 +252,7 @@ cmd_usage() {
 	        List passwords.
 	    $PROGRAM find pass-names...
 	    	List passwords that match pass-names.
-	    $PROGRAM [show] [--clip[=line-number],-c[line-number]] pass-name
+		  $PROGRAM [show] [--clip[=line-number],-c[line-number]] [--qrcode[=line-number],-q[line-number]]
 	        Show existing password and optionally put it on the clipboard.
 	        If put on the clipboard, it will be cleared in $CLIP_TIME seconds.
 	    $PROGRAM grep [GREPOPTIONS] search-string
@@ -333,7 +343,8 @@ cmd_show() {
 		else
 			echo "${path%\/}"
 		fi
-		tree -N -C -l --noreport "$PREFIX/$path" | tail -n +2 | sed -E 's/\.age(\x1B\[[0-9]+m)?( ->|$)/\1\2/g' # remove .age at end of line, but keep colors
+		# tree -N -C -l --noreport "$PREFIX/$path" | tail -n +2 | sed -E 's/\.age(\x1B\[[0-9]+m)?( ->|$)/\1\2/g' # remove .age at end of line, but keep colors
+		eza --color=always -TI '*.tmp.*' "$@" "$PREFIX/$path" | tail -n +2 | sed -E 's/\.age(\x1B\[[0-9]+m)?( ->|$)/\1\2/g' # remove .age at end of line, but keep colors
 	elif [[ -z $path ]]; then
 		die "Error: password store is empty."
 	else
@@ -346,6 +357,7 @@ cmd_find() {
 	IFS="," eval 'echo "Search Terms: $*"'
 	local terms="*$(printf '%s*|*' "$@")"
 	tree -N -C -l --noreport -P "${terms%|*}" --prune --matchdirs --ignore-case "$PREFIX" | tail -n +2 | sed -E 's/\.age(\x1B\[[0-9]+m)?( ->|$)/\1\2/g'
+	# eza --color=always -TI '*.tmp.*' "$PREFIX/$path" | tail -n +2 | sed -E 's/\.age(\x1B\[[0-9]+m)?( ->|$)/\1\2/g' # remove .age at end of line, but keep colors
 }
 
 cmd_grep() {
@@ -390,7 +402,7 @@ cmd_insert() {
 	if [[ $multiline -eq 1 ]]; then
 		echo "Enter contents of $path and press Ctrl+D when finished:"
 		echo
-		$AGE -e "${AGE_RECIPIENT_ARGS[@]}" -o "$passfile" || die "Password encryption aborted."
+		$AGE -e -a "${AGE_RECIPIENT_ARGS[@]}" -o "$passfile" || die "Password encryption aborted."
 	elif [[ $noecho -eq 1 ]]; then
 		local password password_again
 		while true; do
@@ -399,7 +411,7 @@ cmd_insert() {
 			read -r -p "Retype password for $path: " -s password_again || exit 1
 			echo
 			if [[ $password == "$password_again" ]]; then
-				echo "$password" | $AGE -e "${AGE_RECIPIENT_ARGS[@]}" -o "$passfile" || die "Password encryption aborted."
+				echo "$password" | $AGE -e -a "${AGE_RECIPIENT_ARGS[@]}" -o "$passfile" || die "Password encryption aborted."
 				break
 			else
 				die "Error: the entered passwords do not match."
@@ -408,7 +420,7 @@ cmd_insert() {
 	else
 		local password
 		read -r -p "Enter password for $path: " -e password
-		echo "$password" | $AGE -e "${AGE_RECIPIENT_ARGS[@]}" -o "$passfile" || die "Password encryption aborted."
+		echo "$password" | $AGE -e -a "${AGE_RECIPIENT_ARGS[@]}" -o "$passfile" || die "Password encryption aborted."
 	fi
 	git_add_file "$passfile" "Add given password for $path to store."
 }
@@ -434,7 +446,7 @@ cmd_edit() {
 	${EDITOR:-vi} "$tmp_file"
 	[[ -f $tmp_file ]] || die "New password not saved."
 	$AGE -d -o - -i "$IDENTITIES_FILE" "$passfile" 2>/dev/null | diff - "$tmp_file" &>/dev/null && die "Password unchanged."
-	while ! $AGE -e "${AGE_RECIPIENT_ARGS[@]}" -o "$passfile" "$tmp_file"; do
+	while ! $AGE -e -a "${AGE_RECIPIENT_ARGS[@]}" -o "$passfile" "$tmp_file"; do
 		yesno "Age encryption failed. Would you like to try again?"
 	done
 	git_add_file "$passfile" "$action password for $path using ${EDITOR:-vi}."
@@ -470,10 +482,10 @@ cmd_generate() {
 	read -r -n $length pass < <(LC_ALL=C tr -dc "$characters" < /dev/urandom)
 	[[ ${#pass} -eq $length ]] || die "Could not generate password from /dev/urandom."
 	if [[ $inplace -eq 0 ]]; then
-		echo "$pass" | $AGE -e "${AGE_RECIPIENT_ARGS[@]}" -o "$passfile" || die "Password encryption aborted."
+		echo "$pass" | $AGE -e -a "${AGE_RECIPIENT_ARGS[@]}" -o "$passfile" || die "Password encryption aborted."
 	else
 		local passfile_temp="${passfile}.tmp.${RANDOM}.${RANDOM}.${RANDOM}.${RANDOM}.--"
-		if { echo "$pass"; $AGE -d -i "$IDENTITIES_FILE" "$passfile" | tail -n +2; } | $AGE -e "${AGE_RECIPIENT_ARGS[@]}" -o "$passfile_temp"; then
+		if { echo "$pass"; $AGE -d -i "$IDENTITIES_FILE" "$passfile" | tail -n +2; } | $AGE -e -a "${AGE_RECIPIENT_ARGS[@]}" -o "$passfile_temp"; then
 			mv "$passfile_temp" "$passfile"
 		else
 			rm -f "$passfile_temp"
@@ -525,61 +537,139 @@ cmd_delete() {
 	rmdir -p "${passfile%/*}" 2>/dev/null
 }
 
-cmd_copy_move() {
-	local opts move=1 force=0
+# TODO: Should spaces in the name be accounted for?
+#       It'll have to be done everywhere else as well.
+cmd_move() {
+  local opts move=1 force=0 yes=0
 	[[ $1 == "copy" ]] && move=0
 	shift
-	opts="$($GETOPT -o f -l force -n "$PROGRAM" -- "$@")"
+	opts="$($GETOPT -o fy -l force,yes -n "$PROGRAM" -- "$@")"
 	local err=$?
 	eval set -- "$opts"
 	while true; do case $1 in
-		-f|--force) force=1; shift ;;
-		--) shift; break ;;
+    -f|--force) force=1; shift ;;
+    -y|--yes) yes=1; shift ;;
+    --) shift; break ;;
 	esac done
-	[[ $# -ne 2 ]] && die "Usage: $PROGRAM $COMMAND [--force,-f] old-path new-path"
+	[[ $# -ne 2 ]] && die "Usage: $PROGRAM $COMMAND [--force,-f] [--yes,-y] old-path new-path"
 	check_sneaky_paths "$@"
-	local old_path="$PREFIX/${1%/}"
+	[[ "$1" = /* ]]
+	local absolute=$?
+	if [[ $absolute -eq 0 ]]; then
+	  local old_path="$1"
+	else
+	  local old_path="$PREFIX/${1%/}"
+	fi
 	local old_dir="$old_path"
 	local new_path="$PREFIX/$2"
 
-	if ! [[ -f $old_path.age && -d $old_path && $1 == */ || ! -f $old_path.age ]]; then
-		old_dir="${old_path%/*}"
-		old_path="${old_path}.age"
-	fi
-	echo "$old_path"
-	[[ -e $old_path ]] || die "Error: $1 is not in the password store."
+  if [[ $absolute -eq 0 ]]; then
+    [[ -e "$old_path" ]] || die "Error: \"$old_path\" does not exist."
+    if [[ $yes -eq 0 ]]; then
+      if [[ $move -eq 1 ]]; then
+        yesno "Would you like to move \"$old_path\" to \"$new_path\" in the passage store?"
+      else
+        yesno "Would you like to copy \"$old_path\" to \"$new_path\" in the passage store?"
+      fi
+    fi
+  else
+  	if ! [[ -f $old_path.age && -d $old_path && $1 == */ || ! -f $old_path.age ]]; then
+  		old_dir="${old_path%/*}"
+  		old_path="${old_path}.age"
+  	fi
+  	echo "$old_path"
+  	[[ -e $old_path ]] || die "Error: $1 is not in the password store."
+  fi
 
 	mkdir -p -v "${new_path%/*}"
 	[[ -d $old_path || -d $new_path || $new_path == */ ]] || new_path="${new_path}.age"
+	[[ $absolute -eq 0 ]] && set_age_recipients "$(dirname -- "$new_path")"
+
+	[[ $force -eq 0 && -e $new_path ]] && yesno "An entry already exists for $2. Overwrite it?"
 
 	local interactive="-i"
 	[[ ! -t 0 || $force -eq 1 ]] && interactive="-f"
 
 	set_git "$new_path"
 	if [[ $move -eq 1 ]]; then
-		mv $interactive -v "$old_path" "$new_path" || exit 1
-		[[ -e "$new_path" ]] && reencrypt_path "$new_path"
+	  if [[ $absolute -eq 0 ]]; then
+			echo "$old_path: encrypting with: age ${AGE_RECIPIENT_ARGS[@]}"
+			$AGE -e -a "${AGE_RECIPIENT_ARGS[@]}" -o "$new_path" "$old_path" || exit 1
 
-		set_git "$new_path"
-		if [[ -n $INNER_GIT_DIR && ! -e $old_path ]]; then
-			git -C "$INNER_GIT_DIR" rm -qr "$old_path" 2>/dev/null
-			set_git "$new_path"
-			git_add_file "$new_path" "Rename ${1} to ${2}."
+			if [[ $force -eq 1 ]]; then
+			  rm -rf "$old_path" || exit 1
+			else
+			  rm -r "$old_path" || exit 1
+			fi
+
+  		set_git "$new_path"
+			git_add_file "$new_path" "Rename ${old_path} to ${2}."
+	  else
+  		mv $interactive -v "$old_path" "$new_path" || exit 1
+
+      # TODO: Is this necessary?
+  		# [[ -e "$new_path" ]] && reencrypt_path "$new_path"
+
+  		set_git "$new_path"
+  		if [[ -n $INNER_GIT_DIR && ! -e $old_path ]]; then
+  			git -C "$INNER_GIT_DIR" rm -qr "$old_path" 2>/dev/null
+  			set_git "$new_path"
+				git_add_file "$new_path" "Rename ${1} to ${2}."
+  		fi
+  		set_git "$old_path"
+  		if [[ -n $INNER_GIT_DIR && ! -e $old_path ]]; then
+  			git -C "$INNER_GIT_DIR" rm -qr "$old_path" 2>/dev/null
+  			set_git "$old_path"
+  			[[ -n $(git -C "$INNER_GIT_DIR" status --porcelain "$old_path") ]] && git_commit "Remove ${1}."
+  		fi
+  		rmdir -p "$old_dir" 2>/dev/null
 		fi
-		set_git "$old_path"
-		if [[ -n $INNER_GIT_DIR && ! -e $old_path ]]; then
-			git -C "$INNER_GIT_DIR" rm -qr "$old_path" 2>/dev/null
-			set_git "$old_path"
-			[[ -n $(git -C "$INNER_GIT_DIR" status --porcelain "$old_path") ]] && git_commit "Remove ${1}."
-		fi
-		rmdir -p "$old_dir" 2>/dev/null
 	else
-		cp $interactive -r -v "$old_path" "$new_path" || exit 1
-		[[ -e "$new_path" ]] && reencrypt_path "$new_path"
-		git_add_file "$new_path" "Copy ${1} to ${2}."
+	  if [[ $absolute -eq 0 ]]; then
+			echo "$old_path: encrypting with: age ${AGE_RECIPIENT_ARGS[@]}"
+			$AGE -e -a "${AGE_RECIPIENT_ARGS[@]}" -o "$new_path" "$old_path" || exit 1
+
+ 			git_add_file "$new_path" "Copy ${old_path} to ${2}."
+		else
+  		cp $interactive -r -v "$old_path" "$new_path" || exit 1
+
+      # TODO: Is this necessary?
+  		# [[ -e "$new_path" ]] && reencrypt_path "$new_path"
+
+ 			git_add_file "$new_path" "Copy ${1} to ${2}."
+    fi
 	fi
 }
 
+cmd_copy_move() {
+
+  # Adapted From:
+  # Comment: https://stackoverflow.com/questions/1853946/getting-the-last-argument-passed-to-a-shell-script/1854031#comment49070610_1854031
+  # User 1: https://stackoverflow.com/users/2813687/foo
+  # Answer 2: https://stackoverflow.com/a/11055036
+  # User 2: https://stackoverflow.com/users/1458569/igor-chubin
+  old_path="${@: -2:1}"
+  new_path="${@: -1:1}"
+
+  # Adapted From:
+  # Answer: https://stackoverflow.com/a/1215592
+  # User: https://stackoverflow.com/users/93555/krzysztof-klimonda
+  other_args="${@:1:$#-2}"
+
+  if [[ "$old_path" = /* ]] && [[ -d "$old_path" ]]; then
+
+    # TODO: Account for spaces in the filenames then remove the `-E "* *"'.
+    for file in $(fd . -HaLt f -E "* *" "$old_path"); do
+
+      new_file="$(basename "$file")"
+      copy_move $other_args "$file" "${new_path}/${new_file}"
+    done
+  else
+    copy_move "$@"
+  fi
+}
+
+# TODO: This looks important.
 cmd_git() {
 	set_git "$PREFIX/"
 	if [[ $1 == "init" ]]; then
@@ -655,7 +745,7 @@ case "$1" in
 	generate) shift;		cmd_generate "$@" ;;
 	reencrypt) shift;		cmd_reencrypt "$@" ;;
 	delete|rm|remove) shift;	cmd_delete "$@" ;;
-	rename|mv) shift;		cmd_copy_move "move" "$@" ;;
+	rename|move|mv) shift;		cmd_copy_move "move" "$@" ;;
 	copy|cp) shift;			cmd_copy_move "copy" "$@" ;;
 	git) shift;			cmd_git "$@" ;;
 	*)				cmd_extension_or_show "$@" ;;

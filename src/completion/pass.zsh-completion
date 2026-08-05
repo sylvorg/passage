@@ -1,3 +1,5 @@
+# TODO: Fix not showing files from `PASSAGE_DIR'.
+
 #compdef passage
 #autoload
 

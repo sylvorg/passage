@@ -4,7 +4,10 @@
     flake-compat.url = "https://flakehub.com/f/edolstra/flake-compat/1.tar.gz";
     flake-parts.url = "github:hercules-ci/flake-parts";
     nixpkgs.url = "github:nixos/nixpkgs?ref=pull/524417/merge";
-    pass-genphrase.url = "github:congma/pass-genphrase?ref=pull/6/merge";
+    pass-genphrase = {
+      url = "github:congma/pass-genphrase?ref=pull/6/merge";
+      flake = false;
+    };
   };
   outputs =
     inputs@{ flake-parts, ... }:

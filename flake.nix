@@ -33,8 +33,6 @@
             age
             eza
             fd
-            ripgrep
-            sops
           ];
         in
         {
@@ -55,10 +53,6 @@
             passage = pkgs.passage.overrideAttrs (old: {
               src = ./.;
               extraPath = old.extraPath + ":" + (lib.makeBinPath binPath);
-              postInstall = ''
-                substituteInPlace $out/bin/passage \
-                  --replace-fail 'SOPS="''${PASSAGE_SOPS:-sops}"' 'SOPS=${lib.getExe pkgs.sops}'
-              '' + old.postInstall;
             });
           };
           devenv.shells = rec {

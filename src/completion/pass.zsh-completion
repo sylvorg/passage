@@ -17,6 +17,9 @@
 #   PASSAGE_DIR=$HOME/work/pass passage $@
 # }
 
+# TODO: Fix not showing files from `PASSAGE_DIR'.
+# TODO: Add verify command and sops flag for show.
+
 
 _passage () {
 	local cmd

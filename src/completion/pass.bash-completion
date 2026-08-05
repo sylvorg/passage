@@ -4,6 +4,8 @@
 # Brian Mattern <rephorm@rephorm.com>. All Rights Reserved.
 # This file is licensed under the GPLv2+. Please see COPYING for more information.
 
+# TODO: Add verify command and sops flag for show.
+
 _pass_complete_entries () {
 	local prefix="${PASSAGE_DIR:-$HOME/.passage/store/}"
 	prefix="${prefix%/}/"
@@ -20,7 +22,7 @@ _pass_complete_entries () {
 	local i=0 item
 
 	for item in ${items[@]}; do
-		[[ $item =~ /\.[^/]*$ ]] && continue
+		[[ $item =~ /\.[^/]*$ ]] || [[ $item == *.sops ]] && continue
 
 		# if there is a unique match, and it is a directory with one entry
 		# autocomplete the subentry as well (recursively)
@@ -74,7 +76,7 @@ _pass()
 {
 	COMPREPLY=()
 	local cur="${COMP_WORDS[COMP_CWORD]}"
-	local commands="init ls find grep show insert generate edit rm mv cp git help version ${PASSWORD_STORE_EXTENSION_COMMANDS[*]}"
+	local commands="init ls find grep show insert generate edit rm mv cp git verify help version ${PASSWORD_STORE_EXTENSION_COMMANDS[*]}"
 	if [[ $COMP_CWORD -gt 1 ]]; then
 		local lastarg="${COMP_WORDS[$COMP_CWORD-1]}"
 		case "${COMP_WORDS[1]}" in
@@ -93,8 +95,8 @@ _pass()
 				COMPREPLY+=($(compgen -W "-n --no-symbols -c --clip -f --force -i --in-place" -- ${cur}))
 				_pass_complete_entries
 				;;
-			cp|copy|mv|rename)
-				COMPREPLY+=($(compgen -W "-f --force" -- ${cur}))
+			cp|copy|mv|move|rename)
+				COMPREPLY+=($(compgen -W "-f --force -y --yes" -- ${cur}))
 				_pass_complete_entries
 				;;
 			rm|remove|delete)

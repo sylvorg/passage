@@ -7,10 +7,15 @@ umask "${PASSWORD_STORE_UMASK:-077}"
 set -o pipefail
 
 AGE="${PASSAGE_AGE:-age}"
+SOPS="${PASSAGE_SOPS:-sops}"
 PASSAGE="1"
 
 PREFIX="${PASSAGE_DIR:-$HOME/.passage/store}"
+
 IDENTITIES_FILE="${PASSAGE_IDENTITIES_FILE:-$HOME/.passage/identities}"
+export SOPS_CONFIG="${PASSAGE_SOPS_CONFIG:-$HOME/.passage/.sops.config}"
+export SOPS_AGE_KEY_FILE="$IDENTITIES_FILE"
+
 EXTENSIONS="${PASSAGE_EXTENSIONS_DIR:-$HOME/.passage/extensions}"
 X_SELECTION="${PASSWORD_STORE_X_SELECTION:-clipboard}"
 CLIP_TIME="${PASSWORD_STORE_CLIP_TIME:-45}"
@@ -33,10 +38,20 @@ set_git() {
 	[[ $(git -C "$INNER_GIT_DIR" rev-parse --is-inside-work-tree 2>/dev/null) == true ]] || INNER_GIT_DIR=""
 }
 git_add_file() {
+
+	# Adapted From:
+	# Answer: https://stackoverflow.com/a/1215592
+	# User: https://stackoverflow.com/users/93555/krzysztof-klimonda
+	files="${@:1:$#-1}"
+
 	[[ -n $INNER_GIT_DIR ]] || return
-	git -C "$INNER_GIT_DIR" add "$1" || return
-	[[ -n $(git -C "$INNER_GIT_DIR" status --porcelain "$1") ]] || return
-	git_commit "$2"
+	git -C "$INNER_GIT_DIR" add $files || return
+	[[ -n $(git -C "$INNER_GIT_DIR" status --porcelain $files) ]] || return
+
+	# Adapted From:
+	# Answer: https://stackoverflow.com/a/33271194
+	# User: https://stackoverflow.com/users/3856785/epi272314
+	git_commit "${@:$#}"
 }
 git_commit() {
 	[[ -n $INNER_GIT_DIR ]] || return
@@ -54,16 +69,26 @@ die() {
 }
 set_age_recipients() {
 	AGE_RECIPIENT_ARGS=( )
+	SOPS_RECIPIENT_ARGS=""
 
 	if [[ -n $PASSAGE_RECIPIENTS_FILE ]]; then
 		AGE_RECIPIENT_ARGS+=( "-R" "$PASSAGE_RECIPIENTS_FILE" )
+
+    # Adapted From:
+    # Answer: https://unix.stackexchange.com/a/60995
+    # User: https://unix.stackexchange.com/users/25985/goldilocks
+		SOPS_RECIPIENT_ARGS=$(rg '^[^#;]' "$PASSAGE_RECIPIENTS_FILE" | tr '\n' ',')
+		SOPS_RECIPIENT_ARGS="${SOPS_RECIPIENT_ARGS%,*}"
+
 		return
 	fi
 
 	if [[ -n $PASSAGE_RECIPIENTS ]]; then
 		for age_recipient in $PASSAGE_RECIPIENTS; do
 			AGE_RECIPIENT_ARGS+=( "-r" "$age_recipient" )
+			SOPS_RECIPIENT_ARGS+="$age_recipient,"
 		done
+		SOPS_RECIPIENT_ARGS="${SOPS_RECIPIENT_ARGS::-1}"
 		return
 	fi
 
@@ -75,10 +100,44 @@ set_age_recipients() {
 
 	if [[ ! -f $current ]]; then
 		AGE_RECIPIENT_ARGS+=( "-i" "$IDENTITIES_FILE" )
+
+		# Adapted From: https://mywiki.wooledge.org/BashFAQ/001
+		while IFS= read -r line; do
+
+			# Adapted From:
+			# Answer: https://stackoverflow.com/a/2172367
+			# User: https://stackoverflow.com/users/126042/mark-rushakoff
+			# if [[ $line == AGE-* ]]; then
+
+			#   # TODO: `age-keygen -y' won't work for `age-plugin-tpm', for example.
+			# 	SOPS_RECIPIENT_ARGS+="$(echo $line | age-keygen -y),"
+
+			# fi
+			if [[ $line == AGE-SECRET-KEY* ]]; then
+				SOPS_RECIPIENT_ARGS+="$(echo $line | age-keygen -y),"
+			fi
+
+		done < "$IDENTITIES_FILE"
+
+		# Adapted From:
+		# Answer: https://unix.stackexchange.com/a/144330
+		# User: https://unix.stackexchange.com/users/38906/cuonglm
+		SOPS_RECIPIENT_ARGS="${SOPS_RECIPIENT_ARGS::-1}"
+
 		return
 	fi
 
 	AGE_RECIPIENT_ARGS+=( "-R" "$current" )
+
+	# while IFS= read -r line; do
+	# 	if [[ $line != \#* ]]; then
+	# 		SOPS_RECIPIENT_ARGS+="$line,"
+	# 	fi
+	# done < "$current"
+	# SOPS_RECIPIENT_ARGS="${SOPS_RECIPIENT_ARGS::-1}"
+
+	SOPS_RECIPIENT_ARGS=$(rg '^[^#;]' "$current" | tr '\n' ',')
+	SOPS_RECIPIENT_ARGS="${SOPS_RECIPIENT_ARGS%,*}"
 }
 
 reencrypt_path() {
@@ -92,10 +151,29 @@ reencrypt_path() {
 		passfile_display="${passfile_display%.age}"
 		local passfile_temp="${passfile}.tmp.${RANDOM}.${RANDOM}.${RANDOM}.${RANDOM}.--"
 
+		# Adapted From:
+		# Answer: https://unix.stackexchange.com/a/489457
+		# User: https://unix.stackexchange.com/users/116858/kusalananda
+		local sopsfile="${passfile%.age}.sops"
+
 		set_age_recipients "$passfile_dir"
 		echo "$passfile_display: reencrypting with: age ${AGE_RECIPIENT_ARGS[@]}"
-		$AGE -d -i "$IDENTITIES_FILE" "$passfile" | $AGE -e "${AGE_RECIPIENT_ARGS[@]}" -o "$passfile_temp" &&
+		$AGE -d -i "$IDENTITIES_FILE" "$passfile" | \
+
+			# Adapted From:
+			# Answer: https://unix.stackexchange.com/a/28519
+			# User: https://unix.stackexchange.com/users/5842/mat
+			tee >($SOPS \
+			  -e \
+				--age "$SOPS_RECIPIENT_ARGS" \
+				--input-type binary \
+				--filename-override "$sopsfile" \
+				--output "$sopsfile" \
+				/dev/stdin) | \
+
+			$AGE -e -a "${AGE_RECIPIENT_ARGS[@]}" -o "$passfile_temp" &&
 		mv "$passfile_temp" "$passfile" || rm -f "$passfile_temp"
+    # sops updatekeys -y --input-type binary "$sopsfile"
 	done < <(find "$1" -path '*/.git' -prune -o -iname '*.age' -print0)
 }
 check_sneaky_paths() {
@@ -242,9 +320,10 @@ cmd_usage() {
 	        List passwords.
 	    $PROGRAM find pass-names...
 	    	List passwords that match pass-names.
-	    $PROGRAM [show] [--clip[=line-number],-c[line-number]] pass-name
+	    $PROGRAM [show] [--clip[=line-number],-c[line-number]] [--qrcode[=line-number],-q[line-number]] [--sops,-s] pass-name
 	        Show existing password and optionally put it on the clipboard.
 	        If put on the clipboard, it will be cleared in $CLIP_TIME seconds.
+	        Can also show the sops version as well.
 	    $PROGRAM grep [GREPOPTIONS] search-string
 	        Search for password files containing search-string when decrypted.
 	    $PROGRAM insert [--echo,-e | --multiline,-m] [--force,-f] pass-name
@@ -269,6 +348,8 @@ cmd_usage() {
 	    $PROGRAM git git-command-args...
 	        If the password store is a git repository, execute a git command
 	        specified by git-command-args.
+	    $PROGRAM verify
+	        Verifies whether a password's age file matches its sops file.
 	    $PROGRAM help
 	        Show this text.
 	    $PROGRAM version
@@ -296,14 +377,16 @@ cmd_reencrypt() {
 	git_add_file "$PREFIX/$path" "Reencrypted $path."
 }
 
+# TODO: Copy the error catching mechanism to cmd_verify.
 cmd_show() {
-	local opts selected_line clip=0 qrcode=0
-	opts="$($GETOPT -o q::c:: -l qrcode::,clip:: -n "$PROGRAM" -- "$@")"
+	local opts selected_line use_sops=0 clip=0 qrcode=0
+	opts="$($GETOPT -o q::c::s:: -l qrcode::,clip::,sops:: -n "$PROGRAM" -- "$@")"
 	local err=$?
 	eval set -- "$opts"
 	while true; do case $1 in
 		-q|--qrcode) qrcode=1; selected_line="${2:-1}"; shift 2 ;;
 		-c|--clip) clip=1; selected_line="${2:-1}"; shift 2 ;;
+		-s|--sops) use_sops=1; selected_line="${2:-1}"; shift 2 ;;
 		--) shift; break ;;
 	esac done
 
@@ -312,14 +395,23 @@ cmd_show() {
 	local pass
 	local path="$1"
 	local passfile="$PREFIX/$path.age"
+	local sopsfile="$PREFIX/$path.sops"
 	check_sneaky_paths "$path"
 	if [[ -f $passfile ]]; then
 		if [[ $clip -eq 0 && $qrcode -eq 0 ]]; then
-			pass="$($AGE -d -i "$IDENTITIES_FILE" "$passfile" | $BASE64)" || exit $?
+			if [[ $use_sops -eq 1 ]]; then
+				pass="$($SOPS -d --output-type binary "$sopsfile" | $BASE64)" || exit $?
+			else
+				pass="$($AGE -d -i "$IDENTITIES_FILE" "$passfile" | $BASE64)" || exit $?
+			fi
 			echo "$pass" | $BASE64 -d
 		else
 			[[ $selected_line =~ ^[0-9]+$ ]] || die "Clip location '$selected_line' is not a number."
-			pass="$($AGE -d -i "$IDENTITIES_FILE" "$passfile" | tail -n +${selected_line} | head -n 1)" || exit $?
+			if [[ $use_sops -eq 1 ]]; then
+				pass="$($SOPS -d --output-type binary "$sopsfile" | tail -n +${selected_line} | head -n 1)" || exit $?
+			else
+				pass="$($AGE -d -i "$IDENTITIES_FILE" "$passfile" | tail -n +${selected_line} | head -n 1)" || exit $?
+			fi
 			[[ -n $pass ]] || die "There is no password to put on the clipboard at line ${selected_line}."
 			if [[ $clip -eq 1 ]]; then
 				clip "$pass" "$path"
@@ -333,7 +425,8 @@ cmd_show() {
 		else
 			echo "${path%\/}"
 		fi
-		tree -N -C -l --noreport "$PREFIX/$path" | tail -n +2 | sed -E 's/\.age(\x1B\[[0-9]+m)?( ->|$)/\1\2/g' # remove .age at end of line, but keep colors
+		# tree -N -C -l -I "*.sops" --noreport "$PREFIX/$path" | tail -n +2 | sed -E 's/\.age(\x1B\[[0-9]+m)?( ->|$)/\1\2/g' # remove .age at end of line, but keep colors
+		eza -TI "*.sops" -I '*.tmp.*' "$@" "$PREFIX/$path" | tail -n +2 | sed -E 's/\.age(\x1B\[[0-9]+m)?( ->|$)/\1\2/g' # remove .age at end of line, but keep colors
 	elif [[ -z $path ]]; then
 		die "Error: password store is empty."
 	else
@@ -345,7 +438,8 @@ cmd_find() {
 	[[ $# -eq 0 ]] && die "Usage: $PROGRAM $COMMAND pass-names..."
 	IFS="," eval 'echo "Search Terms: $*"'
 	local terms="*$(printf '%s*|*' "$@")"
-	tree -N -C -l --noreport -P "${terms%|*}" --prune --matchdirs --ignore-case "$PREFIX" | tail -n +2 | sed -E 's/\.age(\x1B\[[0-9]+m)?( ->|$)/\1\2/g'
+	tree -N -C -l -I "*.sops" --noreport -P "${terms%|*}" --prune --matchdirs --ignore-case "$PREFIX" | tail -n +2 | sed -E 's/\.age(\x1B\[[0-9]+m)?( ->|$)/\1\2/g'
+	# eza -TI "*.sops" -I '*.tmp.*' "$PREFIX/$path" | tail -n +2 | sed -E 's/\.age(\x1B\[[0-9]+m)?( ->|$)/\1\2/g'
 }
 
 cmd_grep() {
@@ -379,6 +473,7 @@ cmd_insert() {
 	[[ $err -ne 0 || ( $multiline -eq 1 && $noecho -eq 0 ) || $# -ne 1 ]] && die "Usage: $PROGRAM $COMMAND [--echo,-e | --multiline,-m] [--force,-f] pass-name"
 	local path="${1%/}"
 	local passfile="$PREFIX/$path.age"
+	local sopsfile="$PREFIX/$path.sops"
 	check_sneaky_paths "$path"
 	set_git "$passfile"
 
@@ -390,7 +485,19 @@ cmd_insert() {
 	if [[ $multiline -eq 1 ]]; then
 		echo "Enter contents of $path and press Ctrl+D when finished:"
 		echo
-		$AGE -e "${AGE_RECIPIENT_ARGS[@]}" -o "$passfile" || die "Password encryption aborted."
+
+		# Adapted From:
+		# Answer: https://unix.stackexchange.com/a/28519
+		# User: https://unix.stackexchange.com/users/5842/mat
+		tee >($SOPS \
+			-e \
+			--age "$SOPS_RECIPIENT_ARGS" \
+			--input-type binary \
+			--filename-override "$sopsfile" \
+			--output "$sopsfile" \
+			/dev/stdin) | \
+
+		$AGE -e -a "${AGE_RECIPIENT_ARGS[@]}" -o "$passfile" || die "Password encryption aborted."
 	elif [[ $noecho -eq 1 ]]; then
 		local password password_again
 		while true; do
@@ -399,7 +506,20 @@ cmd_insert() {
 			read -r -p "Retype password for $path: " -s password_again || exit 1
 			echo
 			if [[ $password == "$password_again" ]]; then
-				echo "$password" | $AGE -e "${AGE_RECIPIENT_ARGS[@]}" -o "$passfile" || die "Password encryption aborted."
+				echo "$password" | \
+
+				# Adapted From:
+				# Answer: https://unix.stackexchange.com/a/28519
+				# User: https://unix.stackexchange.com/users/5842/mat
+				tee >($SOPS \
+					-e \
+					--age "$SOPS_RECIPIENT_ARGS" \
+					--input-type binary \
+					--filename-override "$sopsfile" \
+					--output "$sopsfile" \
+					/dev/stdin) | \
+
+				$AGE -e -a "${AGE_RECIPIENT_ARGS[@]}" -o "$passfile" || die "Password encryption aborted."
 				break
 			else
 				die "Error: the entered passwords do not match."
@@ -408,9 +528,22 @@ cmd_insert() {
 	else
 		local password
 		read -r -p "Enter password for $path: " -e password
-		echo "$password" | $AGE -e "${AGE_RECIPIENT_ARGS[@]}" -o "$passfile" || die "Password encryption aborted."
+		echo "$password" | \
+
+			# Adapted From:
+			# Answer: https://unix.stackexchange.com/a/28519
+			# User: https://unix.stackexchange.com/users/5842/mat
+			tee >($SOPS \
+				-e \
+				--age "$SOPS_RECIPIENT_ARGS" \
+				--input-type binary \
+				--filename-override "$sopsfile" \
+				--output "$sopsfile" \
+				/dev/stdin) | \
+
+			$AGE -e -a "${AGE_RECIPIENT_ARGS[@]}" -o "$passfile" || die "Password encryption aborted."
 	fi
-	git_add_file "$passfile" "Add given password for $path to store."
+	git_add_file "$passfile" "$sopsfile" "Add given password for $path to store."
 }
 
 cmd_edit() {
@@ -421,6 +554,7 @@ cmd_edit() {
 	mkdir -p -v "$PREFIX/$(dirname -- "$path")"
 	set_age_recipients "$(dirname -- "$path")"
 	local passfile="$PREFIX/$path.age"
+	local sopsfile="$PREFIX/$path.sops"
 	set_git "$passfile"
 
 	tmpdir #Defines $SECURE_TMPDIR
@@ -434,10 +568,11 @@ cmd_edit() {
 	${EDITOR:-vi} "$tmp_file"
 	[[ -f $tmp_file ]] || die "New password not saved."
 	$AGE -d -o - -i "$IDENTITIES_FILE" "$passfile" 2>/dev/null | diff - "$tmp_file" &>/dev/null && die "Password unchanged."
-	while ! $AGE -e "${AGE_RECIPIENT_ARGS[@]}" -o "$passfile" "$tmp_file"; do
+	while ! $AGE -e -a "${AGE_RECIPIENT_ARGS[@]}" -o "$passfile" "$tmp_file"; do
 		yesno "Age encryption failed. Would you like to try again?"
 	done
-	git_add_file "$passfile" "$action password for $path using ${EDITOR:-vi}."
+	$SOPS -e --age "$SOPS_RECIPIENT_ARGS" --input-type binary --output "$sopsfile" "$tmp_file"
+	git_add_file "$passfile" "$sopsfile" "$action password for $path using ${EDITOR:-vi}."
 }
 
 cmd_generate() {
@@ -463,6 +598,7 @@ cmd_generate() {
 	mkdir -p -v "$PREFIX/$(dirname -- "$path")"
 	set_age_recipients "$(dirname -- "$path")"
 	local passfile="$PREFIX/$path.age"
+	local sopsfile="$PREFIX/$path.sops"
 	set_git "$passfile"
 
 	[[ $inplace -eq 0 && $force -eq 0 && -e $passfile ]] && yesno "An entry already exists for $path. Overwrite it?"
@@ -470,11 +606,31 @@ cmd_generate() {
 	read -r -n $length pass < <(LC_ALL=C tr -dc "$characters" < /dev/urandom)
 	[[ ${#pass} -eq $length ]] || die "Could not generate password from /dev/urandom."
 	if [[ $inplace -eq 0 ]]; then
-		echo "$pass" | $AGE -e "${AGE_RECIPIENT_ARGS[@]}" -o "$passfile" || die "Password encryption aborted."
+		echo "$pass" | \
+
+			# Adapted From:
+			# Answer: https://unix.stackexchange.com/a/28519
+			# User: https://unix.stackexchange.com/users/5842/mat
+			tee >($SOPS \
+				-e \
+				--age "$SOPS_RECIPIENT_ARGS" \
+				--input-type binary \
+				--filename-override "$sopsfile" \
+				--output "$sopsfile" \
+				/dev/stdin) | \
+
+			$AGE -e -a "${AGE_RECIPIENT_ARGS[@]}" -o "$passfile" || die "Password encryption aborted."
 	else
 		local passfile_temp="${passfile}.tmp.${RANDOM}.${RANDOM}.${RANDOM}.${RANDOM}.--"
-		if { echo "$pass"; $AGE -d -i "$IDENTITIES_FILE" "$passfile" | tail -n +2; } | $AGE -e "${AGE_RECIPIENT_ARGS[@]}" -o "$passfile_temp"; then
+		if { echo "$pass"; $AGE -d -i "$IDENTITIES_FILE" "$passfile" | tail -n +2; } | $AGE -e -a "${AGE_RECIPIENT_ARGS[@]}" -o "$passfile_temp"; then
 			mv "$passfile_temp" "$passfile"
+			echo "$pass" | $SOPS \
+				-e \
+				--age "$SOPS_RECIPIENT_ARGS" \
+				--input-type binary \
+				--filename-override "$sopsfile" \
+				--output "$sopsfile" \
+				/dev/stdin
 		else
 			rm -f "$passfile_temp"
 			die "Could not reencrypt new password."
@@ -482,7 +638,7 @@ cmd_generate() {
 	fi
 	local verb="Add"
 	[[ $inplace -eq 1 ]] && verb="Replace"
-	git_add_file "$passfile" "$verb generated password for ${path}."
+	git_add_file "$passfile" "$sopsfile" "$verb generated password for ${path}."
 
 	if [[ $clip -eq 1 ]]; then
 		clip "$pass" "$path"
@@ -509,77 +665,186 @@ cmd_delete() {
 
 	local passdir="$PREFIX/${path%/}"
 	local passfile="$PREFIX/$path.age"
+	local sopsfile="$PREFIX/$path.sops"
 	[[ -f $passfile && -d $passdir && $path == */ || ! -f $passfile ]] && passfile="${passdir%/}/"
 	[[ -e $passfile ]] || die "Error: $path is not in the password store."
 	set_git "$passfile"
 
 	[[ $force -eq 1 ]] || yesno "Are you sure you would like to delete $path?"
 
-	rm $recursive -f -v "$passfile"
+	rm $recursive -f -v "$passfile" "$sopsfile"
 	set_git "$passfile"
 	if [[ -n $INNER_GIT_DIR && ! -e $passfile ]]; then
-		git -C "$INNER_GIT_DIR" rm -qr "$passfile"
+		git -C "$INNER_GIT_DIR" rm -qr "$passfile" "$sopsfile"
 		set_git "$passfile"
 		git_commit "Remove $path from store."
 	fi
 	rmdir -p "${passfile%/*}" 2>/dev/null
 }
 
-cmd_copy_move() {
-	local opts move=1 force=0
+# TODO: Should spaces in the name be accounted for?
+#       It'll have to be done everywhere else as well.
+copy_move() {
+	local opts move=1 force=0 yes=0
 	[[ $1 == "copy" ]] && move=0
 	shift
-	opts="$($GETOPT -o f -l force -n "$PROGRAM" -- "$@")"
+	opts="$($GETOPT -o fy -l force,yes -n "$PROGRAM" -- "$@")"
 	local err=$?
 	eval set -- "$opts"
 	while true; do case $1 in
-		-f|--force) force=1; shift ;;
+	  -f|--force) force=1; shift ;;
+		-y|--yes) yes=1; shift ;;
 		--) shift; break ;;
 	esac done
-	[[ $# -ne 2 ]] && die "Usage: $PROGRAM $COMMAND [--force,-f] old-path new-path"
+	[[ $# -ne 2 ]] && die "Usage: $PROGRAM $COMMAND [--force,-f] [--yes,-y] old-path new-path"
 	check_sneaky_paths "$@"
-	local old_path="$PREFIX/${1%/}"
+	[[ "$1" = /* ]]
+	local absolute=$?
+	if [[ $absolute -eq 0 ]]; then
+	  local old_path="$1"
+	else
+	  local old_path="$PREFIX/${1%/}"
+	fi
 	local old_dir="$old_path"
 	local new_path="$PREFIX/$2"
 
-	if ! [[ -f $old_path.age && -d $old_path && $1 == */ || ! -f $old_path.age ]]; then
-		old_dir="${old_path%/*}"
-		old_path="${old_path}.age"
-	fi
-	echo "$old_path"
-	[[ -e $old_path ]] || die "Error: $1 is not in the password store."
+  if [[ $absolute -eq 0 ]]; then
+    [[ -e "$old_path" ]] || die "Error: \"$old_path\" does not exist."
+    if [[ $yes -eq 0 ]]; then
+      if [[ $move -eq 1 ]]; then
+        yesno "Would you like to move \"$old_path\" to \"$new_path\" in the passage store?"
+      else
+        yesno "Would you like to copy \"$old_path\" to \"$new_path\" in the passage store?"
+      fi
+    fi
+  else
+  	if ! [[ -f $old_path.age && -d $old_path && $1 == */ || ! -f $old_path.age ]]; then
+  		old_dir="${old_path%/*}"
+  		old_path="${old_path}.age"
+  	fi
+  	echo "$old_path"
+  	[[ -e $old_path ]] || die "Error: $1 is not in the password store."
+  fi
 
 	mkdir -p -v "${new_path%/*}"
 	[[ -d $old_path || -d $new_path || $new_path == */ ]] || new_path="${new_path}.age"
+	[[ $absolute -eq 0 ]] && set_age_recipients "$(dirname -- "$new_path")"
+
+	[[ $force -eq 0 && -e $new_path ]] && yesno "An entry already exists for $2. Overwrite it?"
 
 	local interactive="-i"
 	[[ ! -t 0 || $force -eq 1 ]] && interactive="-f"
 
 	set_git "$new_path"
 	if [[ $move -eq 1 ]]; then
-		mv $interactive -v "$old_path" "$new_path" || exit 1
-		[[ -e "$new_path" ]] && reencrypt_path "$new_path"
+	  if [[ $absolute -eq 0 ]]; then
+			echo "$old_path: encrypting with: age ${AGE_RECIPIENT_ARGS[@]}"
+			$AGE -e -a "${AGE_RECIPIENT_ARGS[@]}" -o "$new_path" "$old_path" || exit 1
+			$SOPS \
+				-e \
+				--age "$SOPS_RECIPIENT_ARGS" \
+				--input-type binary \
+				--filename-override "${new_path%.age}.sops" \
+				--output "${new_path%.age}.sops" \
+			  "$old_path" || exit 1
 
-		set_git "$new_path"
-		if [[ -n $INNER_GIT_DIR && ! -e $old_path ]]; then
-			git -C "$INNER_GIT_DIR" rm -qr "$old_path" 2>/dev/null
-			set_git "$new_path"
-			git_add_file "$new_path" "Rename ${1} to ${2}."
+			if [[ $force -eq 1 ]]; then
+			  rm -rf "$old_path" || exit 1
+			else
+			  rm -r "$old_path" || exit 1
+			fi
+
+  		set_git "$new_path"
+ 			if [[ "$old_path" == *.age ]]; then
+ 				git_add_file "$new_path" "${new_path%.age}.sops" "Rename ${old_path} to ${2}."
+ 			else
+ 				git_add_file "$new_path" "Rename ${old_path} to ${2}."
+ 			fi
+	  else
+  		mv $interactive -v "$old_path" "$new_path" || exit 1
+  		[[ "$old_path" == *.age ]] && { mv $interactive -v "${old_path%.age}.sops" "${new_path%.age}.sops" || exit 1; }
+  		[[ -e "$new_path" ]] && reencrypt_path "$new_path"
+
+  		set_git "$new_path"
+  		if [[ -n $INNER_GIT_DIR && ! -e $old_path ]]; then
+  			git -C "$INNER_GIT_DIR" rm -qr "$old_path" 2>/dev/null
+  			set_git "$new_path"
+  			if [[ "$old_path" == *.age ]]; then
+  				git -C "$INNER_GIT_DIR" rm -qr "${old_path%.age}.sops" 2>/dev/null
+  				git_add_file "$new_path" "${new_path%.age}.sops" "Rename ${1} to ${2}."
+  			else
+  				git_add_file "$new_path" "Rename ${1} to ${2}."
+  			fi
+  		fi
+  		set_git "$old_path"
+  		if [[ -n $INNER_GIT_DIR && ! -e $old_path ]]; then
+  			git -C "$INNER_GIT_DIR" rm -qr "$old_path" 2>/dev/null
+  			[[ "$old_path" == *.age ]] && git -C "$INNER_GIT_DIR" rm -qr "${old_path%.age}.sops" 2>/dev/null
+  			set_git "$old_path"
+  			[[ -n $(git -C "$INNER_GIT_DIR" status --porcelain "$old_path") ]] && git_commit "Remove ${1}."
+  		fi
+  		rmdir -p "$old_dir" 2>/dev/null
 		fi
-		set_git "$old_path"
-		if [[ -n $INNER_GIT_DIR && ! -e $old_path ]]; then
-			git -C "$INNER_GIT_DIR" rm -qr "$old_path" 2>/dev/null
-			set_git "$old_path"
-			[[ -n $(git -C "$INNER_GIT_DIR" status --porcelain "$old_path") ]] && git_commit "Remove ${1}."
-		fi
-		rmdir -p "$old_dir" 2>/dev/null
 	else
-		cp $interactive -r -v "$old_path" "$new_path" || exit 1
-		[[ -e "$new_path" ]] && reencrypt_path "$new_path"
-		git_add_file "$new_path" "Copy ${1} to ${2}."
+	  if [[ $absolute -eq 0 ]]; then
+			echo "$old_path: encrypting with: age ${AGE_RECIPIENT_ARGS[@]}"
+			$AGE -e -a "${AGE_RECIPIENT_ARGS[@]}" -o "$new_path" "$old_path" || exit 1
+			$SOPS \
+				-e \
+				--age "$SOPS_RECIPIENT_ARGS" \
+				--input-type binary \
+				--filename-override "${new_path%.age}.sops" \
+				--output "${new_path%.age}.sops" \
+			  "$old_path" || exit 1
+
+  		if [[ "$old_path" == *.age ]]; then
+  			git_add_file "$new_path" "${new_path%.age}.sops" "Copy ${old_path} to ${2}."
+  		else
+  			git_add_file "$new_path" "Copy ${old_path} to ${2}."
+  		fi
+		else
+  		cp $interactive -r -v "$old_path" "$new_path" || exit 1
+  		[[ "$old_path" == *.age ]] && { cp $interactive -r -v "${old_path%.age}.sops" "${new_path%.age}.sops" || exit 1; }
+  		[[ -e "$new_path" ]] && reencrypt_path "$new_path"
+
+  		if [[ "$old_path" == *.age ]]; then
+  			git_add_file "$new_path" "${new_path%.age}.sops" "Copy ${1} to ${2}."
+  		else
+  			git_add_file "$new_path" "Copy ${1} to ${2}."
+  		fi
+    fi
 	fi
 }
 
+cmd_copy_move() {
+
+  # Adapted From:
+  # Comment: https://stackoverflow.com/questions/1853946/getting-the-last-argument-passed-to-a-shell-script/1854031#comment49070610_1854031
+  # User 1: https://stackoverflow.com/users/2813687/foo
+  # Answer 2: https://stackoverflow.com/a/11055036
+  # User 2: https://stackoverflow.com/users/1458569/igor-chubin
+  old_path="${@: -2:1}"
+  new_path="${@: -1:1}"
+
+  # Adapted From:
+  # Answer: https://stackoverflow.com/a/1215592
+  # User: https://stackoverflow.com/users/93555/krzysztof-klimonda
+  other_args="${@:1:$#-2}"
+
+  if [[ "$old_path" = /* ]] && [[ -d "$old_path" ]]; then
+
+    # TODO: Account for spaces in the filenames then remove the `-E "* *"'.
+    for file in $(fd . -HaLt f -E "* *" "$old_path"); do
+
+      new_file="$(basename "$file")"
+      copy_move $other_args "$file" "${new_path}/${new_file}"
+    done
+  else
+    copy_move "$@"
+  fi
+}
+
+# TODO: This looks important.
 cmd_git() {
 	set_git "$PREFIX/"
 	if [[ $1 == "init" ]]; then
@@ -625,6 +890,19 @@ cmd_extension() {
 	return 0
 }
 
+cmd_verify() {
+	local path="$1"
+	local passfile="$PREFIX/$path.age"
+	local sopsfile="$PREFIX/$path.sops"
+
+	tmpdir #Defines $SECURE_TMPDIR
+	local tmp_file="$(mktemp -u "$SECURE_TMPDIR/XXXXXX")-${path//\//-}.txt"
+	if [[ -f $passfile ]]; then
+		$AGE -d -o "$tmp_file" -i "$IDENTITIES_FILE" "$passfile" || exit 1
+	fi
+	$SOPS -d --output-type binary "$sopsfile" 2>/dev/null | diff - "$tmp_file" &>/dev/null && die "Password verified."
+}
+
 #
 # END subcommand functions
 #
@@ -655,9 +933,10 @@ case "$1" in
 	generate) shift;		cmd_generate "$@" ;;
 	reencrypt) shift;		cmd_reencrypt "$@" ;;
 	delete|rm|remove) shift;	cmd_delete "$@" ;;
-	rename|mv) shift;		cmd_copy_move "move" "$@" ;;
+	rename|move|mv) shift;		cmd_copy_move "move" "$@" ;;
 	copy|cp) shift;			cmd_copy_move "copy" "$@" ;;
 	git) shift;			cmd_git "$@" ;;
+	verify) shift;			cmd_verify "$@" ;;
 	*)				cmd_extension_or_show "$@" ;;
 esac
 exit 0
